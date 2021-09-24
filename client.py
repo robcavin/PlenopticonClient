@@ -1,189 +1,226 @@
 import socket
-import glob
-#from PIL import Image
-import numpy as np
 import io
 import threading
 import collections
 import cv2
 from utils import ArducamUtils
 import os
-
-# image_paths = glob.glob('*png')
-# images = []
-
-# print(image_paths)
-# for path in image_paths:
-#     with Image.open(path) as img:
-#         image = img.resize((1280*4,800))
-#         images.append(np.array(image))
-
-# print("Done")
-# print(len(images))
-
-HOST = '172.20.10.1'  # The server's hostname or IP address
-PORT = 1000        # The port used by the server
-
-fifo = collections.deque(maxlen=150)
-
-import sched
+from enum import Enum
 import time
+import sys
 
-scheduler = sched.scheduler(time.time, time.sleep)
+FRAME_BUFFER_SIZE = 10
+DEBUG = True
+DEBUG_STREAM = False
+
+class ConnectionState(Enum):
+    NOT_CONNECTED = 0
+    READY_TO_CONNECT = 1
+    CONNECTED = 2
+
+class StreamingMode(Enum):
+    ALL_FRAMES_LOW_RES = 0
+    ONE_FRAME_HIGH_RES = 1
+
+g_streaming_mode = StreamingMode.ALL_FRAMES_LOW_RES
+g_streaming_detail_img = -1
+
+g_state = ConnectionState.NOT_CONNECTED
+g_server_ip = "172.20.10.6"
+g_server_port = 1000
+g_frame_fifo = collections.deque(maxlen=FRAME_BUFFER_SIZE)
+g_record_video = False
+g_arducam_utils = None
+
+g_logfile = open("/tmp/pleno.log","w",1)
+
+def log(message) :
+    g_logfile.write(message+"\n")
+    g_logfile.flush()
+    if DEBUG : print(message)
+
+
+def readCommandThread(s) :
+    global g_streaming_mode
+    global g_streaming_detail_img
+    global g_record_video
+
+    class Command(Enum):
+        STREAM_ALL_FRAMES_LOW_RES = 0
+        STREAM_ONE_FRAME_HIGH_RES = 1
+        SET_EXPOSURE = 2
+        RECORD_FRAMES_TO_DISK = 3
+
+    run = True
+    while run:
+        try :
+            data = s.recv(2)
+            command = data[0]
+            value = data[1]
+            if command ==  Command.STREAM_ALL_FRAMES_LOW_RES :
+                g_streaming_mode = 0
+                g_streaming_detail_img = -1
+            elif command == Command.STREAM_ONE_FRAME_HIGH_RES :
+                g_streaming_mode = 1
+                g_streaming_detail_img = value
+            elif command == Command.SET_EXPOSURE :
+                os.system("v4l2-ctl -c exposure={}".format(int(value/255.0 * 1500) ))
+            elif command == Command.RECORD_FRAMES_TO_DISK :
+                g_record_video = True
+        except :
+            print("Unexpected error:", sys.exc_info())
+            run = False
+
+def streamingThread(s) :
+    next_run = threading.Timer(0.1, streamingThread, args=[s])
+    next_run.start()
+    if len(g_frame_fifo) > 0 :
+        raw_frame = g_frame_fifo[-1]
+        images_indices = []
+        images_to_stream = [] # Could not put these numpy arrays in dicts
+
+        image_array = g_arducam_utils.convert(raw_frame)
+
+        if g_streaming_mode == StreamingMode.ALL_FRAMES_LOW_RES :
+            for idx in range(4) :
+                offset = idx * 1280
+                images_to_stream.append(image_array[::4,offset:offset+1280:4])
+                images_indices.append(idx)
+
+        elif g_streaming_mode == StreamingMode.ONE_FRAME_HIGH_RES :
+            offset = g_streaming_detail_img * 1280
+            images_to_stream.append(image_array[:,offset:offset+1280])
+            images_indices.append(g_streaming_detail_img)
+
+        for i in range(len(images_indices)) :
+            idx = images_indices[i]
+            image = images_to_stream[i]
+            _, encoded_image = cv2.imencode(".jpeg",image)
+            with io.BytesIO() as image_buffer:
+                image_buffer.write((48).to_bytes(1,"little"))
+                image_buffer.write(idx.to_bytes(1,"little"))
+                image_buffer.write(len(encoded_image).to_bytes(4,"little"))
+                image_buffer.write(encoded_image)
+                try :
+                    s.send(image_buffer.getvalue())
+                except:
+                    next_run.cancel()
+
+def wakeupThread() :
+    # UDPServerSocket = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
+    # UDPServerSocket.bind(("172.20.10.5", 8081))
+    # bufferSize  = 1024
+    # log("Listening for UDP broadcast on port 8081")
+
+    # while(True):
+    #     (msg,addr) = UDPServerSocket.recvfrom(bufferSize)
+    #     print(msg)
+    #     if msg == "connect" and (g_state == ConnectionState.NOT_CONNECTED):
+    #         g_server_ip = addr
+    #         g_state = ConnectionState.READY_TO_CONNECT
+    #         log("Server up notification - IP is ",g_server_ip)
+            
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                try : 
+                    s.connect((g_server_ip, g_server_port))
+                    g_state = ConnectionState.CONNECTED
+                    log("Connected")
+                except : 
+                    g_state = ConnectionState.NOT_CONNECTED
+                    log("Connection failed")
+                if g_state == ConnectionState.CONNECTED :
+                    command_thread = threading.Thread(target=readCommandThread, args=[s])
+                    command_thread.start()
+                    threading.Timer(0.1,streamingThread, args=[s]).start()
+                    command_thread.join()
+                    try:
+                        s.shutdown()
+                        s.close()
+                    except:
+                        None
+                    g_state = ConnectionState.NOT_CONNECTED
+                    log("Connection closed")
+
+
+
 
 def fourcc(a, b, c, d):
     return ord(a) | (ord(b) << 8) | (ord(c) << 16) | (ord(d) << 24)
 
-with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+def videoCaptureThread() :
+    global g_record_video
+    global g_frame_fifo
+    global g_arducam_utils
 
     cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
     cap.set(cv2.CAP_PROP_FOURCC, fourcc('R','G','G','B'))
 
-    arducam_utils = ArducamUtils(0)
+    g_arducam_utils = ArducamUtils(0)
 
-    _, firmware_version = arducam_utils.read_dev(ArducamUtils.FIRMWARE_VERSION_REG)
-    _, sensor_id = arducam_utils.read_dev(ArducamUtils.FIRMWARE_SENSOR_ID_REG)
-    _, serial_number = arducam_utils.read_dev(ArducamUtils.SERIAL_NUMBER_REG)
-    print("Firmware Version: {}".format(firmware_version))
-    print("Sensor ID: 0x{:04X}".format(sensor_id))
-    print("Serial Number: 0x{:08X}".format(serial_number))
+    _, firmware_version = g_arducam_utils.read_dev(ArducamUtils.FIRMWARE_VERSION_REG)
+    _, sensor_id = g_arducam_utils.read_dev(ArducamUtils.FIRMWARE_SENSOR_ID_REG)
+    _, serial_number = g_arducam_utils.read_dev(ArducamUtils.SERIAL_NUMBER_REG)
+    log("Firmware Version: {}".format(firmware_version))
+    log("Sensor ID: 0x{:04X}".format(sensor_id))
+    log("Serial Number: 0x{:08X}".format(serial_number))
     
     cap.set(cv2.CAP_PROP_CONVERT_RGB, 0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280*4)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 800)
 
-
-    s.connect((HOST, PORT))
-    print("Connected")
-
-    mode = 0
-    detail = 0
-    capture = True
-    record = False
-
-    def readCommandThread() :
-        global mode
-        global detail
-        run = True
-        while run:
-            try :
-                data = s.recv(2)
-                command = data[0]
-                value = data[1]
-                print('Received', repr(data))
-                if command == 0 : # stream all
-                    mode = 0
-                    detail = 0
-                elif command == 1 : # stream one
-                    mode = 1
-                    detail = value
-                elif command == 2  : # exposure
-                    #print("v4l2-ctl -c exposure={}".format(int(value/255.0 * 10000)))
-                    os.system("v4l2-ctl -c exposure={}".format(int(value/255.0 * 1500) ))
-                elif command == 3 :
-                    record = True
-
-            except :
-                run = False
-
-
-    def streamingThread() :
-        next_run = threading.Timer(0.1, streamingThread)
-        next_run.start()
-        if len(fifo) > 0 :
-            image_array = fifo[-1]
-            images_indices = []
-            image_arrays = []
-
-            image_array = arducam_utils.convert(image_array)
-
-            if mode == 0 :
-                for idx in range(4) :
-                    offset = idx * 1280
-                    test = image_array[::4,offset:offset+1280:4]
-                    images_indices.append(idx)
-                    image_arrays.append(test)
-
-            elif mode == 1 :
-                offset = detail * 1280
-                image_arrays.append(image_array[:,offset:offset+1280])
-                images_indices.append(detail)
-
-            for i in range(len(images_indices)) :
-                idx = images_indices[i]
-                image = image_arrays[i]
-                _, encoded_image = cv2.imencode(".jpeg",image)
-                with io.BytesIO() as image_buffer:
-                    image_buffer.write((48).to_bytes(1,"little"))
-                    image_buffer.write(idx.to_bytes(1,"little"))
-                    image_buffer.write(len(encoded_image).to_bytes(4,"little"))
-                    image_buffer.write(encoded_image)
-                    try :
-                        s.send(image_buffer.getvalue())
-                    except:
-                        next_run.cancel()
-
-    command_thread = threading.Thread(target=readCommandThread).start()
-    threading.Timer(0.1,streamingThread).start()
-
-    frames = 1
+    frame_idx = 1
     start = time.time()
-    num_frames_to_record = 10
-    record_frame = 100
+    record_frame_idx = -1
     while True:
         ret, raw_frame = cap.read()
         raw_frame = raw_frame.reshape(800,1280*4)
         
-        if record == True :
-            record_frame = frames + num_frames_to_record
-            record = False
+        if g_record_video == True :
+            record_frame_idx = frame_idx + FRAME_BUFFER_SIZE / 2  # Capture before and after
+            g_record_video = False
         
-        if frames == record_frame :
-            print("Starting to save")
+        if frame_idx == record_frame_idx :
+            log("saving queue at frame {}".format(frame_idx))
             idx = 0
-            for frame in fifo :
+            for frame in g_frame_fifo :
                 cv2.imwrite("img_{:03d}.png".format(idx), frame)
-                img = cv2.imread("img_{:03d}.png".format(idx))
-                print((img[:,:,0] - frame).max())
                 idx += 1
-
-            print("Done saving")
-
-
-        if capture :
-            if len(fifo) >= num_frames_to_record :
-                old = fifo.popleft()
-                del old
-            fifo.append(raw_frame)
-
-        if not (frames % 100) :
-            now = time.time()
-            print(100 / (now - start))
-            start = now
-
-        frames += 1
+            log("Done saving")
 
 
-        #rgb_frame = arducam_utils.convert(raw_frame)
-        #rgb_frame = rgb_frame[::4,:1280:4]
-        #cv2.imshow("debug",rgb_frame)
-        #cv2.waitKey(1)
+        if len(g_frame_fifo) >= FRAME_BUFFER_SIZE :
+            old = g_frame_fifo.popleft()
+            del old
+        g_frame_fifo.append(raw_frame)
 
-#    image_idx = 0
-#    start = time.time()
-#    def cameraStream() :
-#        scheduler.enter(0.03333,1,cameraStream,())
-#
-#        global image_idx
-#        if image_idx >= len(images) :
-#            image_idx = 0
-#        image = images[image_idx]
-#        image_idx += 1
-#
-#        if len(fifo) >= 150:
-#            old = fifo.popleft()
-#            del old
-#        fifo.append(image)
-#
-#    scheduler.enter(0,1,cameraStream,())
-#    schedule.run(True)
+        if DEBUG :
+            if not (frame_idx % 100) :
+                now = time.time()
+                print("FPS : ",100 / (now - start))
+                start = now
+
+        if DEBUG_STREAM :
+            image = g_arducam_utils.convert(raw_frame)
+            image = cv2.resize(image,(1280,200))
+            cv2.imshow("Debug",image)
+            cv2.waitKey(1)
+
+        frame_idx += 1
+
+
+def start() :
+    log("Starting plenopticon client")
+    wakeup_thread = threading.Thread(target=wakeupThread)
+    video_capture_thread = threading.Thread(target=videoCaptureThread)
+
+    wakeup_thread.start()
+    video_capture_thread.start()
+
+    wakeup_thread.join()
+    video_capture_thread.join()
+
+    log("Terminated unexpectedly")
+
+
+if __name__ == "__main__" :
+    start()
