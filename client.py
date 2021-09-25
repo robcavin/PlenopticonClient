@@ -8,8 +8,10 @@ import os
 from enum import Enum
 import time
 import sys
+import signal
 
 FRAME_BUFFER_SIZE = 10
+INDEX_OFFSET = 0
 DEBUG = True
 DEBUG_STREAM = False
 
@@ -32,6 +34,8 @@ g_frame_fifo = collections.deque(maxlen=FRAME_BUFFER_SIZE)
 g_record_video = False
 g_arducam_utils = None
 
+g_shutdown = False
+
 g_logfile = open("/tmp/pleno.log","w",1)
 
 def log(message) :
@@ -52,7 +56,7 @@ def readCommandThread(s) :
         RECORD_FRAMES_TO_DISK = 3
 
     run = True
-    while run:
+    while run and not g_shutdown:
         try :
             data = s.recv(2)
             command = data[0]
@@ -67,11 +71,18 @@ def readCommandThread(s) :
                 os.system("v4l2-ctl -c exposure={}".format(int(value/255.0 * 1500) ))
             elif command == Command.RECORD_FRAMES_TO_DISK :
                 g_record_video = True
+        except socket.timeout :
+            None
         except :
-            print("Unexpected error:", sys.exc_info())
+            log("Unexpected error:{}".format(sys.exc_info()))
             run = False
+    
+    log("Ending readCommandThread")
 
 def streamingThread(s) :
+    if g_shutdown : 
+        log("Ending streamingThread")
+        return
     next_run = threading.Timer(0.1, streamingThread, args=[s])
     next_run.start()
     if len(g_frame_fifo) > 0 :
@@ -85,10 +96,10 @@ def streamingThread(s) :
             for idx in range(4) :
                 offset = idx * 1280
                 images_to_stream.append(image_array[::4,offset:offset+1280:4])
-                images_indices.append(idx)
+                images_indices.append(idx + INDEX_OFFSET)
 
         elif g_streaming_mode == StreamingMode.ONE_FRAME_HIGH_RES :
-            offset = g_streaming_detail_img * 1280
+            offset = g_streaming_detail_img % 4 * 1280
             images_to_stream.append(image_array[:,offset:offset+1280])
             images_indices.append(g_streaming_detail_img)
 
@@ -105,8 +116,11 @@ def streamingThread(s) :
                     s.send(image_buffer.getvalue())
                 except:
                     next_run.cancel()
+                    log("Ending streamingThread")
+                    break
 
 def wakeupThread() :
+    global g_state
     # UDPServerSocket = socket.socket(family=socket.AF_INET, type=socket.SOCK_DGRAM)
     # UDPServerSocket.bind(("172.20.10.5", 8081))
     # bufferSize  = 1024
@@ -119,15 +133,14 @@ def wakeupThread() :
     #         g_server_ip = addr
     #         g_state = ConnectionState.READY_TO_CONNECT
     #         log("Server up notification - IP is ",g_server_ip)
-            
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                try : 
-                    s.connect((g_server_ip, g_server_port))
-                    g_state = ConnectionState.CONNECTED
-                    log("Connected")
-                except : 
-                    g_state = ConnectionState.NOT_CONNECTED
-                    log("Connection failed")
+    while g_state == ConnectionState.NOT_CONNECTED and not g_shutdown :
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try : 
+                s.settimeout(5)
+                s.connect((g_server_ip, g_server_port))
+                g_state = ConnectionState.CONNECTED
+                log("Connected")
+
                 if g_state == ConnectionState.CONNECTED :
                     command_thread = threading.Thread(target=readCommandThread, args=[s])
                     command_thread.start()
@@ -137,10 +150,17 @@ def wakeupThread() :
                         s.shutdown()
                         s.close()
                     except:
-                        None
+                        print("Error shutting down socket")
                     g_state = ConnectionState.NOT_CONNECTED
                     log("Connection closed")
+                    time.sleep(10)
 
+            except : 
+                g_state = ConnectionState.NOT_CONNECTED
+                log("Connection failed")
+                time.sleep(5)
+
+    log("Ending wakeupThread")
 
 
 
@@ -171,7 +191,7 @@ def videoCaptureThread() :
     frame_idx = 1
     start = time.time()
     record_frame_idx = -1
-    while True:
+    while not g_shutdown:
         ret, raw_frame = cap.read()
         raw_frame = raw_frame.reshape(800,1280*4)
         
@@ -207,9 +227,25 @@ def videoCaptureThread() :
 
         frame_idx += 1
 
+    log("Ending videoCaptureThread")
+
+
+
+def signal_handler(sig, frame):
+    global g_shutdown
+    g_shutdown = True
+    print("Shutting down")
 
 def start() :
-    log("Starting plenopticon client")
+
+    global INDEX_OFFSET
+
+    signal.signal(signal.SIGINT, signal_handler)
+
+    if len(sys.argv) > 1 :
+        INDEX_OFFSET = 4 * int(sys.argv[1])
+
+    log("Starting plenopticon client with index offset {}".format(INDEX_OFFSET))
     wakeup_thread = threading.Thread(target=wakeupThread)
     video_capture_thread = threading.Thread(target=videoCaptureThread)
 
@@ -223,4 +259,5 @@ def start() :
 
 
 if __name__ == "__main__" :
+
     start()
