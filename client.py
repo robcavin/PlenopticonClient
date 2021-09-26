@@ -219,7 +219,7 @@ def videoCaptureThread() :
             log("saving queue at frame {}".format(frame_idx))
             idx = 0
             for frame in g_frame_fifo :
-                cv2.imwrite("img_{:03d}.png".format(idx), frame)
+                cv2.imwrite("/home/rob/pleno_log/img_{:03d}.png".format(idx), frame)
                 idx += 1
             log("Done saving")
 
