@@ -28,7 +28,7 @@ g_streaming_mode = StreamingMode.ALL_FRAMES_LOW_RES
 g_streaming_detail_img = -1
 
 g_state = ConnectionState.NOT_CONNECTED
-g_server_ip = "172.20.10.6"
+g_server_ip = "172.20.10.9"
 g_server_port = 1000
 g_frame_fifo = collections.deque(maxlen=FRAME_BUFFER_SIZE)
 g_record_video = False
@@ -36,7 +36,7 @@ g_arducam_utils = None
 
 g_shutdown = False
 
-g_logfile = open("/tmp/pleno.log","w",1)
+g_logfile = open("/home/rob/pleno_log/pleno.log","w",1)
 
 def log(message) :
     g_logfile.write(message+"\n")

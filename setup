@@ -5,3 +5,5 @@ sudo cp pleno.service /lib/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl start pleno
 sudo systemctl enable pleno
+mkdir /home/rob/pleno_log
+chmod 777 /home/rob/pleno_log

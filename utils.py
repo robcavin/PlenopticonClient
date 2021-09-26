@@ -5,6 +5,9 @@ import ctypes
 import cv2
 import numpy as np
 
+import os
+script_path = os.path.dirname(os.path.realpath(__file__))
+
 _IOC_NRBITS = 8
 _IOC_TYPEBITS = 8
 _IOC_SIZEBITS = 14
@@ -127,7 +130,7 @@ class ArducamUtils(object):
 
     def __init__(self, device_num):
         import subprocess
-        command = ['bash', '-c', 'source scripts/jetson_variables.sh && env']
+        command = ['bash', '-c', 'source {}/scripts/jetson_variables.sh && env'.format(script_path)]
 
         proc = subprocess.Popen(command, stdout = subprocess.PIPE)
         environment_vars = {}
