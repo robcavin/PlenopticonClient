@@ -45,6 +45,9 @@ def log(message) :
 
 
 def readCommandThread(s) :
+
+    log("Starting readCommandThread")
+
     global g_streaming_mode
     global g_streaming_detail_img
     global g_record_video
@@ -80,44 +83,55 @@ def readCommandThread(s) :
     log("Ending readCommandThread")
 
 def streamingThread(s) :
-    if g_shutdown : 
-        log("Ending streamingThread")
-        return
-    next_run = threading.Timer(0.1, streamingThread, args=[s])
-    next_run.start()
-    if len(g_frame_fifo) > 0 :
-        raw_frame = g_frame_fifo[-1]
-        images_indices = []
-        images_to_stream = [] # Could not put these numpy arrays in dicts
+    log("Starting streamingThread")
 
-        image_array = g_arducam_utils.convert(raw_frame)
+    run = True
+    last_frame = 0
+    while run and not g_shutdown : 
+        if len(g_frame_fifo) > 0 :
+            raw_frame = g_frame_fifo[-1]
+            images_indices = []
+            images_to_stream = [] # Could not put these numpy arrays in dicts
 
-        if g_streaming_mode == StreamingMode.ALL_FRAMES_LOW_RES :
-            for idx in range(4) :
-                offset = idx * 1280
-                images_to_stream.append(image_array[::4,offset:offset+1280:4])
-                images_indices.append(idx + INDEX_OFFSET)
+            image_array = g_arducam_utils.convert(raw_frame)
 
-        elif g_streaming_mode == StreamingMode.ONE_FRAME_HIGH_RES :
-            offset = g_streaming_detail_img % 4 * 1280
-            images_to_stream.append(image_array[:,offset:offset+1280])
-            images_indices.append(g_streaming_detail_img)
+            if g_streaming_mode == StreamingMode.ALL_FRAMES_LOW_RES :
+                for idx in range(4) :
+                    offset = idx * 1280
+                    images_to_stream.append(image_array[::4,offset:offset+1280:4])
+                    images_indices.append(idx + INDEX_OFFSET)
 
-        for i in range(len(images_indices)) :
-            idx = images_indices[i]
-            image = images_to_stream[i]
-            _, encoded_image = cv2.imencode(".jpeg",image)
-            with io.BytesIO() as image_buffer:
-                image_buffer.write((48).to_bytes(1,"little"))
-                image_buffer.write(idx.to_bytes(1,"little"))
-                image_buffer.write(len(encoded_image).to_bytes(4,"little"))
-                image_buffer.write(encoded_image)
-                try :
-                    s.send(image_buffer.getvalue())
-                except:
-                    next_run.cancel()
-                    log("Ending streamingThread")
-                    break
+            elif g_streaming_mode == StreamingMode.ONE_FRAME_HIGH_RES :
+                offset = g_streaming_detail_img % 4 * 1280
+                images_to_stream.append(image_array[:,offset:offset+1280])
+                images_indices.append(g_streaming_detail_img)
+
+            for i in range(len(images_indices)) :
+                idx = images_indices[i]
+                image = images_to_stream[i]
+                _, encoded_image = cv2.imencode(".jpeg",image)
+                with io.BytesIO() as image_buffer:
+                    image_buffer.write((48).to_bytes(1,"little"))
+                    image_buffer.write(idx.to_bytes(1,"little"))
+                    image_buffer.write(len(encoded_image).to_bytes(4,"little"))
+                    image_buffer.write(encoded_image)
+                    #log("Sending image {} {}".format(len(encoded_image), idx))
+                    try :
+                        s.send(image_buffer.getvalue())
+                    except:
+                        log("Streaming error : {}".format(sys.exc_info()))
+                        run = False
+                        break
+
+        if run :
+            now = time.time()
+            delta = now - last_frame
+            last_frame = now
+            time.sleep(max(0.2-delta, 0)) # Roughly 5 frames per second
+
+
+    log("Ending streamingThread")
+
 
 def wakeupThread() :
     global g_state
@@ -144,8 +158,10 @@ def wakeupThread() :
                 if g_state == ConnectionState.CONNECTED :
                     command_thread = threading.Thread(target=readCommandThread, args=[s])
                     command_thread.start()
-                    threading.Timer(0.1,streamingThread, args=[s]).start()
+                    streaming_thread = threading.Thread(target=streamingThread, args=[s])
+                    streaming_thread.start()
                     command_thread.join()
+                    streaming_thread.join()
                     try:
                         s.shutdown()
                         s.close()
@@ -163,11 +179,11 @@ def wakeupThread() :
     log("Ending wakeupThread")
 
 
-
 def fourcc(a, b, c, d):
     return ord(a) | (ord(b) << 8) | (ord(c) << 16) | (ord(d) << 24)
 
 def videoCaptureThread() :
+    log("Starting videoCaptureThread")
     global g_record_video
     global g_frame_fifo
     global g_arducam_utils
