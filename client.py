@@ -62,13 +62,13 @@ def readCommandThread(s) :
     while run and not g_shutdown:
         try :
             data = s.recv(2)
-            command = data[0]
+            command = Command(data[0])
             value = data[1]
-            if command ==  Command.STREAM_ALL_FRAMES_LOW_RES :
-                g_streaming_mode = 0
+            if command == Command.STREAM_ALL_FRAMES_LOW_RES :
+                g_streaming_mode = StreamingMode.ALL_FRAMES_LOW_RES
                 g_streaming_detail_img = -1
             elif command == Command.STREAM_ONE_FRAME_HIGH_RES :
-                g_streaming_mode = 1
+                g_streaming_mode = StreamingMode.ONE_FRAME_HIGH_RES
                 g_streaming_detail_img = value
             elif command == Command.SET_EXPOSURE :
                 os.system("v4l2-ctl -c exposure={}".format(int(value/255.0 * 1500) ))
