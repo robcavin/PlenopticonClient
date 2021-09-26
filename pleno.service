@@ -1,0 +1,8 @@
+[Unit]
+After=network.target
+Description="Plenopticon"
+[Service]
+ExecStart=/usr/bin/python3 /home/rob/PlenopticonClient/client.py
+User=robot
+[Install]
+WantedBy=multi-user.target

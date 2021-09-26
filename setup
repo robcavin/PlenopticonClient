@@ -1,0 +1,7 @@
+sudo addgroup --system robot
+sudo adduser --system --no-create-home --disabled-login --disabled-password --ingroup robot robot
+sudo adduser robot video
+sudo cp pleno.service /lib/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start pleno
+sudo systemctl enable pleno
