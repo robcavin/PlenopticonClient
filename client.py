@@ -204,9 +204,14 @@ def videoCaptureThread() :
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280*4)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 800)
 
+    os.system("v4l2-ctl -c exposure=1200")
+    os.system("v4l2-ctl -c frame_rate=5")
+    os.system("v4l2-ctl -c frame_rate=30")
+
     frame_idx = 1
     start = time.time()
     record_frame_idx = -1
+    write_idx = 0
     while not g_shutdown:
         ret, raw_frame = cap.read()
         raw_frame = raw_frame.reshape(800,1280*4)
@@ -217,10 +222,9 @@ def videoCaptureThread() :
         
         if frame_idx == record_frame_idx :
             log("saving queue at frame {}".format(frame_idx))
-            idx = 0
             for frame in g_frame_fifo :
-                cv2.imwrite("/home/rob/pleno_log/img_{:03d}.png".format(idx), frame)
-                idx += 1
+                cv2.imwrite("/home/rob/pleno_log/img_{:03d}.png".format(write_idx), frame)
+                write_idx += 1
             log("Done saving")
 
 
